@@ -31,7 +31,7 @@ void ModuleLoaded(CUcontext context,
                   size_t cubin_size)
 {
     // Instrument user code!
-    sanitizerAddPatchesFromFile("MemoryTrackerPatches.fatbin", context);
+    sanitizerAddPatchesFromFile("gputrigger_patch.fatbin", context);
     sanitizerPatchInstructions(SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, module, "MemoryGlobalAccessCallback");
     sanitizerPatchInstructions(SANITIZER_INSTRUCTION_SHARED_MEMORY_ACCESS, module, "MemorySharedAccessCallback");
     sanitizerPatchInstructions(SANITIZER_INSTRUCTION_LOCAL_MEMORY_ACCESS, module, "MemoryLocalAccessCallback");

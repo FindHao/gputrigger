@@ -25,6 +25,10 @@ set(SANITIZER_PATH ${CUDAToolkit_TARGET_DIR}/compute-sanitizer)
 include_directories(${SANITIZER_PATH}/include/ ${CUDAToolkit_TARGET_DIR}/include/)
 message(INFO ${SANITIZER_PATH} ${CUDAToolkit_NVCC_EXECUTABLE})
 
+
+
 link_libraries(-lsanitizer-public)
 add_link_options(-L${SANITIZER_PATH} -fPIC -shared)
+add_custom_target(gputrigger_patch.fatbin ALL $ENV{CUDACXX} ${CMAKE_CUDA_FLAGS} --fatbin --keep-device-functions -Xptxas --compile-as-tools-patch -g  ${CMAKE_SOURCE_DIR}/gputrigger_patch.cu -I${SANITIZER_PATH}/include/ -I${CUDAToolkit_TARGET_DIR}/include/ )
+set_property(TARGET gputrigger_patch.fatbin PROPERTY CUDA_ARCHITECTURES 75)
 add_library(gputrigger SHARED gputrigger.cpp gputrigger.h)

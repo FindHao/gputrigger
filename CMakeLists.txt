@@ -27,4 +27,4 @@ message(INFO ${SANITIZER_PATH} ${CUDAToolkit_NVCC_EXECUTABLE})
 
 link_libraries(-lsanitizer-public)
 add_link_options(-L${SANITIZER_PATH} -fPIC -shared)
-add_library(gputrigger SHARED library.cpp)
+add_library(gputrigger SHARED gputrigger.cpp gputrigger.h)

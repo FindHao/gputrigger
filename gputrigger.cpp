@@ -2,17 +2,28 @@
 #include "gputrigger.h"
 
 #include <sanitizer.h>
-
+#include <sanitizer_result.h>
 #include <iostream>
 #include <map>
 #include <vector>
 
-using namespace std;
-// TODO: handle multiple contexts
+#if SANITIZER_API_DEBUG
+#define PRINT(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define PRINT(...)
+#endif
 
-// TODO: allow override of array size through env variable
+#define GPUPUNK_SANITIZER_CALL(fn, args...) wrapped_call(fn, #fn, ##args)
 
-// TODO: write in a file instead of stdout
+template<typename T, typename ...Args>
+void wrapped_call(T *f, const char *fn, Args... args){
+    SanitizerResult status = f(std::forward<Args>(args)...);
+    if (status != SANITIZER_SUCCESS){
+        const char* error_string;
+        sanitizerGetResultString(status, &error_string);
+        PRINT("Sanitizer result error: function %s failed with error %s\\n", fn, error_string);
+    }
+}
 
 struct LaunchData
 {
@@ -31,9 +42,11 @@ void ModuleLoaded(CUcontext context,
                   size_t cubin_size)
 {
     // Instrument user code!
-    sanitizerAddPatchesFromFile("gputrigger_patch.fatbin", context);
-    sanitizerPatchInstructions(SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, module, "MemoryGlobalAccessCallback");
-    sanitizerPatchModule(module);
+    GPUPUNK_SANITIZER_CALL(sanitizerAddPatchesFromFile, "gputrigger_patch.fatbin", context);
+    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, module, "MemoryGlobalAccessCallback");
+    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_SHARED_MEMORY_ACCESS, module, "MemorySharedAccessCallback");
+    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_LOCAL_MEMORY_ACCESS, module, "MemoryLocalAccessCallback");
+    GPUPUNK_SANITIZER_CALL(sanitizerPatchModule, module);
 }
 
 void LaunchBegin(
@@ -62,7 +75,7 @@ void LaunchBegin(
     sanitizerSetCallbackData(function, dTracker);
 
     LaunchData launchData = {functionName, dTracker};
-    cout<<"Launch\t"<< functionName<<endl;
+    std::cout<<"Launch\t"<< functionName<<std::endl;
     std::vector<LaunchData> &deviceTrackers = pCallbackTracker->memoryTrackers[stream];
     deviceTrackers.push_back(launchData);
 }
@@ -155,6 +168,8 @@ void MemoryTrackerCallback(
         Sanitizer_CallbackId cbid,
         const void *cbdata)
 {
+    using std::cout;
+    using std::endl;
     cout << "tracker\t"<<domain<<endl;
 
     auto *callbackTracker = (CallbackTracker *)userdata;

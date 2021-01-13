@@ -1,90 +1,219 @@
-/* Copyright (c) 2019-2020, NVIDIA CORPORATION. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *  * Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  * Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *  * Neither the name of NVIDIA CORPORATION nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
- * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/*
+ * Use C style programming in this file
  */
-
-#include "gputrigger.h"
+#include "gpu-patch.h"
+#include "gpu-queue.h"
+#include "utils.h"
 
 #include <sanitizer_patching.h>
 
-static __device__
-SanitizerPatchResult CommonCallback(
-    void* userdata,
-    uint64_t pc,
-    void* ptr,
-    uint32_t accessSize,
-    uint32_t flags,
-    MemoryAccessType type)
+/*
+ * Monitor each shared and global memory access.
+ */
+static
+__device__ __forceinline__
+SanitizerPatchResult
+memory_access_callback
+        (
+                void *user_data,
+                uint64_t pc,
+                void *address,
+                uint32_t size,
+                uint32_t flags,
+                const void *new_value
+        )
 {
-    auto* pTracker = (MemoryAccessTracker*)userdata;
+    gpu_patch_buffer_t *buffer = (gpu_patch_buffer_t *)user_data;
 
-    uint32_t old = atomicAdd(&(pTracker->currentEntry), 1);
-
-    // no more space!
-    if (old >= pTracker->maxEntry)
+    if (!sample_callback(buffer->block_sampling_frequency, buffer->block_sampling_offset)) {
         return SANITIZER_PATCH_SUCCESS;
+    }
 
-    MemoryAccess& access = pTracker->accesses[old];
-    access.address = (uint64_t)(uintptr_t)ptr;
-    access.accessSize = accessSize;
-    access.flags = flags;
-    access.threadId = threadIdx;
-    access.type = type;
+    // 1. Init values
+    uint32_t active_mask = __activemask();
+    uint32_t laneid = get_laneid();
+    uint32_t first_laneid = __ffs(active_mask) - 1;
+
+    // 2. Read memory values
+    uint8_t buf[GPU_PATCH_MAX_ACCESS_SIZE];
+    if (new_value == NULL) {
+        // Read operation, old value can be on local memory, shared memory, or global memory
+        if (flags & GPU_PATCH_SHARED) {
+            read_shared_memory(size, (uint32_t)address, buf);
+        } else if (flags & GPU_PATCH_LOCAL) {
+            read_local_memory(size, (uint32_t)address, buf);
+        } else if (flags != SANITIZER_MEMORY_DEVICE_FLAG_FORCE_INT) {
+            read_global_memory(size, (uint64_t)address, buf);
+        }
+    } else {
+        // Write operation, new value is on global memory
+        read_global_memory(size, (uint64_t)new_value, buf);
+    }
+
+    gpu_patch_record_t *record = NULL;
+    if (laneid == first_laneid) {
+        // 3. Get a record
+        record = gpu_queue_get(buffer);
+
+        // 4. Assign basic values
+        record->flags = flags;
+        record->active = active_mask;
+        record->pc = pc;
+        record->size = size;
+        record->flat_thread_id = get_flat_thread_id();
+        record->flat_block_id = get_flat_block_id();
+    }
+
+    __syncwarp(active_mask);
+
+    uint64_t r = (uint64_t)record;
+    record = (gpu_patch_record_t *)shfl(r, first_laneid, active_mask);
+
+    if (record != NULL) {
+        record->address[laneid] = (uint64_t)address;
+        for (uint32_t i = 0; i < size; ++i) {
+            record->value[laneid][i] = buf[i];
+        }
+    }
+
+    __syncwarp(active_mask);
+
+    if (laneid == first_laneid) {
+        // 5. Push a record
+        gpu_queue_push(buffer);
+    }
 
     return SANITIZER_PATCH_SUCCESS;
 }
 
-extern "C" __device__ __noinline__
-SanitizerPatchResult MemoryGlobalAccessCallback(
-    void* userdata,
-    uint64_t pc,
-    void* ptr,
-    uint32_t accessSize,
-    uint32_t flags)
+
+extern "C"
+__device__ __noinline__
+SanitizerPatchResult
+sanitizer_global_memory_access_callback
+        (
+                void *user_data,
+                uint64_t pc,
+                void *address,
+                uint32_t size,
+                uint32_t flags,
+                const void *new_value
+        )
 {
-    return CommonCallback(userdata, pc, ptr, accessSize, flags, MemoryAccessType::Global);
+    return memory_access_callback(user_data, pc, address, size, flags, new_value);
 }
 
-extern "C" __device__ __noinline__
-SanitizerPatchResult MemorySharedAccessCallback(
-    void* userdata,
-    uint64_t pc,
-    void* ptr,
-    uint32_t accessSize,
-    uint32_t flags)
+
+extern "C"
+__device__ __noinline__
+SanitizerPatchResult
+sanitizer_shared_memory_access_callback
+        (
+                void *user_data,
+                uint64_t pc,
+                void *address,
+                uint32_t size,
+                uint32_t flags,
+                const void *new_value
+        )
 {
-    return CommonCallback(userdata, pc, ptr, accessSize, flags, MemoryAccessType::Shared);
+    return memory_access_callback(user_data, pc, address, size, flags | GPU_PATCH_SHARED, new_value);
 }
 
-extern "C" __device__ __noinline__
-SanitizerPatchResult MemoryLocalAccessCallback(
-    void* userdata,
-    uint64_t pc,
-    void* ptr,
-    uint32_t accessSize,
-    uint32_t flags)
+
+extern "C"
+__device__ __noinline__
+SanitizerPatchResult
+sanitizer_local_memory_access_callback
+        (
+                void *user_data,
+                uint64_t pc,
+                void *address,
+                uint32_t size,
+                uint32_t flags,
+                const void *new_value
+        )
 {
-    return CommonCallback(userdata, pc, ptr, accessSize, flags, MemoryAccessType::Local);
+    return memory_access_callback(user_data, pc, address, size, flags | GPU_PATCH_LOCAL, new_value);
+}
+
+
+/*
+ * Lock the corresponding hash entry for a block
+ */
+extern "C"
+__device__ __noinline__
+SanitizerPatchResult
+sanitizer_block_exit_callback
+        (
+                void *user_data,
+                uint64_t pc
+        )
+{
+    gpu_patch_buffer_t* buffer = (gpu_patch_buffer_t *)user_data;
+
+    if (!sample_callback(buffer->block_sampling_frequency, buffer->block_sampling_offset)) {
+        return SANITIZER_PATCH_SUCCESS;
+    }
+
+    uint32_t active_mask = __activemask();
+    uint32_t laneid = get_laneid();
+    uint32_t first_laneid = __ffs(active_mask) - 1;
+    int32_t pop_count = __popc(active_mask);
+
+    if (laneid == first_laneid) {
+        gpu_patch_record_t *record = gpu_queue_get(buffer);
+
+        record->pc = pc;
+        record->flags = GPU_PATCH_BLOCK_EXIT_FLAG;
+        record->flat_block_id = get_flat_block_id();
+        record->flat_thread_id = get_flat_thread_id();
+        record->active = active_mask;
+
+        gpu_queue_push(buffer);
+
+        // Finish a bunch of threads
+        atomicAdd(&buffer->num_threads, -pop_count);
+    }
+
+    return SANITIZER_PATCH_SUCCESS;
+}
+
+
+/*
+ * Sample the corresponding blocks
+ */
+extern "C"
+__device__ __noinline__
+SanitizerPatchResult
+sanitizer_block_enter_callback
+        (
+                void *user_data,
+                uint64_t pc
+        )
+{
+    gpu_patch_buffer_t* buffer = (gpu_patch_buffer_t *)user_data;
+
+    if (!sample_callback(buffer->block_sampling_frequency, buffer->block_sampling_offset)) {
+        return SANITIZER_PATCH_SUCCESS;
+    }
+
+    uint32_t active_mask = __activemask();
+    uint32_t laneid = get_laneid();
+    uint32_t first_laneid = __ffs(active_mask) - 1;
+
+    if (laneid == first_laneid) {
+        // Mark block begin
+        gpu_patch_record_t *record = gpu_queue_get(buffer);
+
+        record->pc = pc;
+        record->flags = GPU_PATCH_BLOCK_ENTER_FLAG;
+        record->flat_block_id = get_flat_block_id();
+        record->flat_thread_id = get_flat_thread_id();
+        record->active = active_mask;
+
+        gpu_queue_push(buffer);
+    }
+
+    return SANITIZER_PATCH_SUCCESS;
 }

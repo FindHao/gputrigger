@@ -1,13 +1,22 @@
-//
-// Created by findhao on 1/7/21.
-//
 
 #ifndef GPUTRIGGER_GPUTRIGGER_H
 #pragma once
+#include <sanitizer.h>
+#include <sanitizer_result.h>
+#include <iostream>
+#include <map>
+#include <vector>
 
 #include <cstdint>
 
 #include <vector_types.h>
+
+void sanitizer_load_callback(CUcontext context,
+                             CUmodule module,
+                             const void *cubin,
+                             size_t cubin_size);
+
+
 
 enum class MemoryAccessType
 {
@@ -33,6 +42,7 @@ struct MemoryAccessTracker
     uint32_t maxEntry;
     MemoryAccess* accesses;
 };
+
 
 #define GPUTRIGGER_GPUTRIGGER_H
 

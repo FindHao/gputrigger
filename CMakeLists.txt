@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.17)
 project(gputrigger)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 find_package(CUDAToolkit REQUIRED)
 
 
@@ -20,7 +20,7 @@ endif ()
 message(WARNING " check cuda" $ENV{CUDACXX} )
 
 enable_language(CUDA)
-set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 set(SANITIZER_PATH ${CUDAToolkit_TARGET_DIR}/compute-sanitizer)
@@ -32,4 +32,4 @@ link_libraries(-lsanitizer-public)
 add_link_options(-L${SANITIZER_PATH} -fPIC -shared)
 add_custom_target(gputrigger_patch.fatbin ALL $ENV{CUDACXX} ${CMAKE_CUDA_FLAGS} --fatbin --keep-device-functions -Xptxas --compile-as-tools-patch -g  -I${SANITIZER_PATH}/include/ -I${CUDAToolkit_TARGET_DIR}/include/ -c ${SOURCE_FILES} )
 set_property(TARGET gputrigger_patch.fatbin PROPERTY CUDA_ARCHITECTURES 75)
-add_library(gputrigger SHARED gputrigger.cpp gputrigger.h)
+add_library(gputrigger SHARED gputrigger.cpp gputrigger.h gputrigger_patch.h)

@@ -30,15 +30,16 @@ struct CallbackTracker {
     std::map<Sanitizer_StreamHandle, std::vector<LaunchData>> memoryTrackers;
 };
 
+
 void sanitizer_load_callback(CUcontext context, CUmodule module, const void *cubin, size_t cubin_size) {
     using std::experimental::filesystem::exists;
     using std::cout;
     using std::endl;
 //    check patch file
-    const char* env_FATBIN_PATCH = std::getenv("GPUPUNK_PATCH");
-    cout<<env_FATBIN_PATCH;
-    if(not exists(env_FATBIN_PATCH)){
-        cout<<" does not exist";
+    const char *env_FATBIN_PATCH = std::getenv("GPUPUNK_PATCH");
+    cout << env_FATBIN_PATCH;
+    if (not exists(env_FATBIN_PATCH)) {
+        cout << " does not exist";
         exit(-1);
     }
     PRINT("Patch CUBIN: \n");
@@ -57,101 +58,10 @@ void sanitizer_load_callback(CUcontext context, CUmodule module, const void *cub
     GPUPUNK_SANITIZER_CALL(sanitizerPatchModule, module);
 }
 
+void gpupunk_memory_register_trigger(Sanitizer_ResourceMemoryData * md){
 
-void LaunchBegin(
-        CallbackTracker *pCallbackTracker,
-        CUcontext context,
-        CUfunction function,
-        std::string functionName,
-        Sanitizer_StreamHandle stream) {
-    constexpr size_t MemAccessDefaultSize = 1024;
-
-    // alloc MemoryAccess array
-    MemoryAccess *accesses = nullptr;
-    sanitizerAlloc(context, (void **) &accesses, sizeof(MemoryAccess) * MemAccessDefaultSize);
-    sanitizerMemset(accesses, 0, sizeof(MemoryAccess) * MemAccessDefaultSize, stream);
-
-    MemoryAccessTracker hTracker;
-    hTracker.currentEntry = 0;
-    hTracker.maxEntry = MemAccessDefaultSize;
-    hTracker.accesses = accesses;
-
-    MemoryAccessTracker *dTracker = nullptr;
-    sanitizerAlloc(context, (void **) &dTracker, sizeof(*dTracker));
-    sanitizerMemcpyHostToDeviceAsync(dTracker, &hTracker, sizeof(*dTracker), stream);
-
-    sanitizerSetCallbackData(function, dTracker);
-
-    LaunchData launchData = {functionName, dTracker};
-    std::cout << "Launch\t" << functionName << std::endl;
-    std::vector<LaunchData> &deviceTrackers = pCallbackTracker->memoryTrackers[stream];
-    deviceTrackers.push_back(launchData);
 }
-
-static std::string GetMemoryRWString(uint32_t flags) {
-    if (flags & SANITIZER_MEMORY_DEVICE_FLAG_READ) {
-        return "Read";
-    } else if (flags & SANITIZER_MEMORY_DEVICE_FLAG_WRITE) {
-        return "Write";
-    } else {
-        return "Unknown";
-    }
-}
-
-static std::string GetMemoryTypeString(MemoryAccessType type) {
-    if (type == MemoryAccessType::Local) {
-        return "local";
-    } else if (type == MemoryAccessType::Shared) {
-        return "shared";
-    } else {
-        return "global";
-    }
-}
-
-void StreamSynchronized(
-        CallbackTracker *pCallbackTracker,
-        CUcontext context,
-        Sanitizer_StreamHandle stream) {
-    MemoryAccessTracker hTracker = {0};
-
-    std::vector<LaunchData> &deviceTrackers = pCallbackTracker->memoryTrackers[stream];
-
-    for (auto &tracker : deviceTrackers) {
-        std::cout << "Kernel Launch: " << tracker.functionName << std::endl;
-
-        sanitizerMemcpyDeviceToHost(&hTracker, tracker.pTracker, sizeof(*tracker.pTracker), stream);
-
-        uint32_t numEntries = std::min(hTracker.currentEntry, hTracker.maxEntry);
-
-        std::cout << "  Memory accesses: " << numEntries << std::endl;
-
-        std::vector<MemoryAccess> accesses(numEntries);
-        sanitizerMemcpyDeviceToHost(accesses.data(), hTracker.accesses, sizeof(MemoryAccess) * numEntries, stream);
-
-        for (uint32_t i = 0; i < numEntries; ++i) {
-            MemoryAccess &access = accesses[i];
-
-            std::cout << "  [" << i << "] " << GetMemoryRWString(access.flags)
-                      << " access of " << GetMemoryTypeString(access.type)
-                      << " memory by thread (" << access.threadId.x
-                      << "," << access.threadId.y
-                      << "," << access.threadId.z
-                      << ") at address 0x" << std::hex << access.address << std::dec
-                      << " (size is " << access.accessSize << " bytes)" << std::endl;
-        }
-
-        sanitizerFree(context, hTracker.accesses);
-        sanitizerFree(context, tracker.pTracker);
-    }
-
-    deviceTrackers.clear();
-}
-
-void ContextSynchronized(CallbackTracker *pCallbackTracker, CUcontext context) {
-    for (auto &streamTracker : pCallbackTracker->memoryTrackers) {
-        StreamSynchronized(pCallbackTracker, context, streamTracker.first);
-    }
-}
+void gpupunk_memory_unregister_trigger(Sanitizer_ResourceMemoryData * md){}
 
 void MemoryTrackerCallback(
         void *userdata,
@@ -162,69 +72,59 @@ void MemoryTrackerCallback(
     using std::endl;
     cout << "tracker\t" << domain << endl;
 
-    auto *callbackTracker = (CallbackTracker *) userdata;
+    static __thread CUcontext sanitizer_thread_context = nullptr;
 
-    switch (domain) {
-        case SANITIZER_CB_DOMAIN_RESOURCE:
-            cout << "SANITIZER_CB_DOMAIN_RESOURCE resource " << cbid << endl;
-            switch (cbid) {
-                case SANITIZER_CBID_RESOURCE_MODULE_LOADED: {
-                    auto *md = (Sanitizer_ResourceModuleData *) cbdata;
-                    sanitizer_load_callback(md->context, md->module, md->pCubin, md->cubinSize);
-                    break;
-                }
-                case SANITIZER_CBID_RESOURCE_STREAM_CREATED:{
+    if (domain == SANITIZER_CB_DOMAIN_RESOURCE) {
+        cout << "SANITIZER_CB_DOMAIN_RESOURCE resource " << cbid << endl;
+        switch (cbid) {
+            case SANITIZER_CBID_RESOURCE_MODULE_LOADED: {
+                auto *md = (Sanitizer_ResourceModuleData *) cbdata;
+                sanitizer_load_callback(md->context, md->module, md->pCubin, md->cubinSize);
+                break;
+            }
+            case SANITIZER_CBID_RESOURCE_STREAM_CREATED: {
 //                    @todo
-                    break;
-                }
-                case SANITIZER_CBID_RESOURCE_DEVICE_MEMORY_ALLOC: {
-                    Sanitizer_ResourceMemoryData *med = (Sanitizer_ResourceMemoryData *) cbdata;
-
-                    cout << "device memory alloc" << endl;
-                    break;
-                }
-                case SANITIZER_CBID_RESOURCE_DEVICE_MEMORY_FREE: {
-                    cout << "device memory free" << endl;
-                    break;
-                }
-                default:
-                    break;
+                break;
             }
-            break;
-        case SANITIZER_CB_DOMAIN_LAUNCH:
-            switch (cbid) {
-                case SANITIZER_CBID_LAUNCH_BEGIN: {
-                    auto *pLaunchData = (Sanitizer_LaunchData *) cbdata;
-                    LaunchBegin(callbackTracker, pLaunchData->context, pLaunchData->function, pLaunchData->functionName,
-                                pLaunchData->hStream);
-                    break;
-                }
-                default:
-                    break;
+            case SANITIZER_CBID_RESOURCE_DEVICE_MEMORY_ALLOC: {
+                Sanitizer_ResourceMemoryData *md = (Sanitizer_ResourceMemoryData *) cbdata;
+                sanitizer_thread_context = md->context;
+                gpupunk_memory_register_trigger(md);
+                break;
             }
-            break;
-        case SANITIZER_CB_DOMAIN_SYNCHRONIZE:
-            switch (cbid) {
-                case SANITIZER_CBID_SYNCHRONIZE_STREAM_SYNCHRONIZED: {
-                    auto *pSyncData = (Sanitizer_SynchronizeData *) cbdata;
-                    StreamSynchronized(callbackTracker, pSyncData->context, pSyncData->hStream);
-                    break;
-                }
-                case SANITIZER_CBID_SYNCHRONIZE_CONTEXT_SYNCHRONIZED: {
-                    auto *pSyncData = (Sanitizer_SynchronizeData *) cbdata;
-                    ContextSynchronized(callbackTracker, pSyncData->context);
-                    break;
-                }
-                default:
-                    break;
+            case SANITIZER_CBID_RESOURCE_DEVICE_MEMORY_FREE: {
+                Sanitizer_ResourceMemoryData *md = (Sanitizer_ResourceMemoryData *) cbdata;
+                sanitizer_thread_context = md->context;
+                gpupunk_memory_unregister_trigger(md);
+                cout << "device memory free" << endl;
+                break;
             }
-            break;
-        case SANITIZER_CB_DOMAIN_UVM:
-            cout << "uvm=======" << endl;
-            cout << cbid << endl;
-            break;
-        default:
-            break;
+            default:
+                break;
+        }
+    } else if (domain == SANITIZER_CB_DOMAIN_LAUNCH) {
+        Sanitizer_LaunchData *ld = (Sanitizer_LaunchData *) cbdata;
+        sanitizer_thread_context = ld->context;
+        if (cbid == SANITIZER_CBID_LAUNCH_BEGIN) {
+            auto *pLaunchData = (Sanitizer_LaunchData *) cbdata;
+//                  gpupunk_kernel_begin(sanitizer_thread_id_local, persistent_id, correlation_id);
+        } else if (cbid == SANITIZER_CBID_LAUNCH_END) {
+//      gpupunk_kernel_end(sanitizer_thread_id_local, persistent_id, correlation_id);
+        }
+    } else if (domain == SANITIZER_CB_DOMAIN_MEMCPY) {
+        Sanitizer_MemcpyData *md = (Sanitizer_MemcpyData *) cbdata;
+        sanitizer_thread_context = md->srcContext;
+        // Avoid memcpy to symbol without allocation
+        // Let gpupunk update shadow memory
+//        gpupunk_memcpy_register(persistent_id, correlation_id, src_host, md->srcAddress, dst_host, md->dstAddress, md->size);
+    } else if (domain == SANITIZER_CB_DOMAIN_MEMSET) {
+        Sanitizer_MemsetData *md = (Sanitizer_MemsetData *) cbdata;
+        sanitizer_thread_context = md->context;
+//    gpupunk_memset_register(persistent_id, correlation_id, md->address, md->value, md->width);
+    } else if (domain == SANITIZER_CB_DOMAIN_SYNCHRONIZE) {
+    } else if (domain == SANITIZER_CB_DOMAIN_UVM) {
+        cout << "uvm=======" << endl;
+        cout << cbid << endl;
     }
 }
 

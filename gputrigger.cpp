@@ -1,8 +1,8 @@
 
 #include "gputrigger.h"
 #include <filesystem>
-#include<experimental/filesystem>
 
+#define SANITIZER_API_DEBUG 1
 #if SANITIZER_API_DEBUG
 #define PRINT(...) fprintf(stderr, __VA_ARGS__)
 #else
@@ -32,29 +32,30 @@ struct CallbackTracker {
 
 
 void sanitizer_load_callback(CUcontext context, CUmodule module, const void *cubin, size_t cubin_size) {
-    using std::experimental::filesystem::exists;
+    using std::filesystem::exists;
     using std::cout;
     using std::endl;
 //    check patch file
     const char *env_FATBIN_PATCH = std::getenv("GPUPUNK_PATCH");
-    cout << env_FATBIN_PATCH;
-    if (not exists(env_FATBIN_PATCH)) {
-        cout << " does not exist";
+    if( (env_FATBIN_PATCH and not exists(env_FATBIN_PATCH)) or (not env_FATBIN_PATCH)) {
+        cout<< "GPUPUNK_PATCH does not exist";
         exit(-1);
     }
+    cout<<env_FATBIN_PATCH;
     PRINT("Patch CUBIN: \n");
     // Instrument user code!
     GPUPUNK_SANITIZER_CALL(sanitizerAddPatchesFromFile, env_FATBIN_PATCH, context);
-    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, module,
-                           "sanitizer_global_memory_access_callback");
-    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_SHARED_MEMORY_ACCESS, module,
-                           "sanitizer_shared_memory_access_callback");
-    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_LOCAL_MEMORY_ACCESS, module,
-                           "sanitizer_local_memory_access_callback");
-    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_BLOCK_ENTER, module,
-                           "sanitizer_block_enter_callback");
-    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_BLOCK_EXIT, module,
-                           "sanitizer_block_exit_callback");
+//    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_GLOBAL_MEMORY_ACCESS, module,
+//                           "sanitizer_global_memory_access_callback");
+//    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_SHARED_MEMORY_ACCESS, module,
+//                           "sanitizer_shared_memory_access_callback");
+//    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_LOCAL_MEMORY_ACCESS, module,
+//                           "sanitizer_local_memory_access_callback");
+//@todo there are bugs.
+//    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_BLOCK_ENTER, module,
+//                           "sanitizer_block_enter_callback");
+//    GPUPUNK_SANITIZER_CALL(sanitizerPatchInstructions, SANITIZER_INSTRUCTION_BLOCK_EXIT, module,
+//                           "sanitizer_block_exit_callback");
     GPUPUNK_SANITIZER_CALL(sanitizerPatchModule, module);
 }
 
